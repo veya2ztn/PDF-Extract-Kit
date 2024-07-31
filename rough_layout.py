@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 import yaml
 from dataaccelerate import DataPrefetcher 
 from torch.utils.data import IterableDataset, get_worker_info
-
+from utils import Timers
 UNIFIED_WIDTH  = 1472  # lets always make the oimage in such size
 UNIFIED_HEIGHT = 1920  # lets always make the oimage in such size
 def pad_image_to_ratio(image, output_width = UNIFIED_WIDTH,output_height=UNIFIED_HEIGHT, ):
@@ -67,7 +67,7 @@ class PDFImageDataset(IterableDataset):
     #client = build_client()
     def __init__(self, metadata_filepath, aug, input_format, 
                  mfd_pre_transform,
-                 return_original_image=False):
+                 return_original_image=False, timer=Timers(False)):
         super().__init__()
         self.metadata= self.smart_read_json(metadata_filepath)
         #self.pathlist= [t['path'] for t in self.metadata]
@@ -77,6 +77,7 @@ class PDFImageDataset(IterableDataset):
         self.input_format = input_format
         self.mfd_pre_transform = mfd_pre_transform
         self.return_original_image = return_original_image
+        self.reading_timer = timer
     def smart_read_json(self, json_path):
         if "s3" in json_path and self.client is None: self.client = build_client()
         if json_path.startswith("s3"): json_path = "opendata:"+ json_path
@@ -90,7 +91,9 @@ class PDFImageDataset(IterableDataset):
     def smart_load_pdf(self, pdf_path):
         if "s3" in pdf_path and self.client is None: self.client = build_client()
         if pdf_path.startswith("s3"): pdf_path = "opendata:"+ pdf_path
-        return read_pdf_from_path(pdf_path, self.client)
+        with self.reading_timer("read_pdf_from_path"):
+            pdfbuffer = read_pdf_from_path(pdf_path, self.client)
+        return pdfbuffer
     
     def clean_pdf_buffer(self):
         keys = list(self.last_read_pdf_buffer.keys())
@@ -123,7 +126,7 @@ class PDFImageDataset(IterableDataset):
             worker_id = worker_info.id
             self.current_pdf_index = worker_id
             self.current_page_index = 0
-
+        
         self.pdf = self.get_pdf_by_index(self.current_pdf_index)
         return self
     
@@ -165,7 +168,8 @@ class PDFImageDataset(IterableDataset):
 
     def __next__(self):
         self.check_should_skip()
-        output = self.read_data_based_on_current_state()
+        with self.reading_timer("read_data_based_on_current_state"):
+            output = self.read_data_based_on_current_state()
         self.current_page_index += 1
         # fail_times = 0
         # try:
@@ -237,13 +241,20 @@ from ultralytics.utils import ops
 import copy
 from modules.self_modify import ModifiedPaddleOCR,update_det_boxes,sorted_boxes
 from utils import *
-
-
+def test_dataset(pdf_path, layout_model, mfd_model):
+    timer = Timers(True)
+    dataset    = PDFImageDataset(pdf_path,layout_model.predictor.aug,layout_model.predictor.input_format,
+                                 
+            mfd_pre_transform=mfd_process(mfd_model.predictor.args.imgsz,mfd_model.predictor.model.stride,mfd_model.predictor.model.pt),
+            det_pre_transform=ocrmodel.batch_det_model.prepare_image, timer=timer,
+            )
+    for data in dataset:
+        timer.log()
 def deal_with_one_dataset(pdf_path, result_path, layout_model, mfd_model, ocrmodel=None, inner_batch_size=4, batch_size=32,num_workers=8,timer=Timers(False)):
     dataset    = PDFImageDataset(pdf_path,layout_model.predictor.aug,layout_model.predictor.input_format,
                                  
                                  mfd_pre_transform=mfd_process(mfd_model.predictor.args.imgsz,mfd_model.predictor.model.stride,mfd_model.predictor.model.pt),
-                                 det_pre_transform=ocrmodel.batch
+                                 det_pre_transform=ocrmodel.batch_det_model.prepare_image,
                                  )
 
     dataloader = DataLoader(dataset, batch_size=batch_size,collate_fn=custom_collate_fn, num_workers=num_workers)        
@@ -371,11 +382,12 @@ if __name__ == "__main__":
     layout_model = get_layout_model(model_configs)
     mfd_model    = get_batch_YOLO_model(model_configs) 
     ocrmodel = None
-    ocrmodel = ocr_model = ModifiedPaddleOCR(show_log=True)
-    timer = Timers(True)
-    deal_with_one_dataset("debug.jsonl", 
-                          "debug.stage_1.jsonl", 
-                          layout_model, mfd_model, ocrmodel=ocrmodel, inner_batch_size=3, batch_size=12,num_workers=4,timer=timer)
+    test_dataset("debug.jsonl", )
+    # ocrmodel = ocr_model = ModifiedPaddleOCR(show_log=True)
+    # timer = Timers(True)
+    # deal_with_one_dataset("debug.jsonl", 
+    #                       "debug.stage_1.jsonl", 
+    #                       layout_model, mfd_model, ocrmodel=ocrmodel, inner_batch_size=3, batch_size=12,num_workers=4,timer=timer)
     # dataset    = PDFImageDataset("part-66210c190659-000035.jsonl",layout_model.predictor.aug,layout_model.predictor.input_format,mfd_pre_transform=None)
     # dataloader = DataLoader(dataset, batch_size=8,collate_fn=custom_collate_fn)  
 
